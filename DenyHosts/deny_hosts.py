@@ -1,6 +1,7 @@
 import logging
 import gzip
 import os
+import os.path
 import signal
 from stat import ST_SIZE, ST_INO
 import time
@@ -45,10 +46,25 @@ class DenyHosts(object):
         self.__sync_upload = is_true(prefs.get("SYNC_UPLOAD"))
         self.__sync_download = is_true(prefs.get("SYNC_DOWNLOAD"))
         self.__iptables = prefs.get("IPTABLES")
+        self.__iptables_jump_target = prefs.get("IPTABLES_JUMP_TARGET")
+        self.__ipset = prefs.get("IPSET")
+        self.__ipset_name = prefs.get("IPSET_NAME")
         self.__blockport = prefs.get("BLOCKPORT")
         self.__pfctl = prefs.get("PFCTL_PATH")
         self.__pftable = prefs.get("PF_TABLE")
         self.__pftablefile = prefs.get("PF_TABLE_FILE")
+
+        if self.__iptables:
+            if not self.__iptables_jump_target:
+                die("IPTABLES set, but IPTABLES_JUMP_TARGET is not")
+            if not self.__ipset:
+                die("IPTABLES set, but IPSET is not")
+            if not self.__ipset_name:
+                die("IPTABLES set, but IPSET_NAME is not")
+            if not os.path.isfile(self.__iptables):
+                die("IPTABLES is set but {} is not a file".format(self.__iptables))
+            if not os.path.isfile(self.__ipset):
+                die("IPSET is set but {} is not a file".format(self.__ipset))
 
         r = Restricted(prefs)
         self.__restricted = r.get_restricted()
@@ -72,6 +88,8 @@ class DenyHosts(object):
 
         if last_offset is not None:
             self.get_denied_hosts()
+            if self.__iptables:
+                self.init_iptables()
             info("Processing log file (%s) from offset (%ld)",
                  logfile,
                  last_offset)
@@ -168,6 +186,10 @@ class DenyHosts(object):
         else:
             sync_sleep_ratio = None
             info("denyhost synchronization disabled")
+
+        if self.__iptables:
+            self.get_denied_hosts()
+            self.init_iptables()
 
         self.daemonLoop(logfile, last_offset, daemon_sleep,
                         purge_time, purge_sleep_ratio, sync_sleep_ratio)
@@ -334,22 +356,9 @@ allowed based on your %s file"""  % (self.__prefs.get("HOSTS_DENY"),
 
         plugin_deny = self.__prefs.get('PLUGIN_DENY')
         if plugin_deny: plugin.execute(plugin_deny, new_hosts)
+        
         if self.__iptables:
-           debug("Trying to create iptables rules")
-           try:
-              for host in new_hosts:
-                  my_host = str(host)
-                  if self.__blockport:
-                     new_rule = self.__iptables + " -I INPUT -p tcp --dport " + self.__blockport + " -s " + my_host + " -j DROP"
-                  else:
-                     new_rule = self.__iptables + " -I INPUT -s " + my_host + " -j DROP"
-                  debug("Running iptabes rule: %s", new_rule)
-                  info("Creating new firewall rule %s", new_rule)
-                  os.system(new_rule);
-
-           except Exception as e:
-               print(e)
-               print("Unable to write new firewall rule.")
+           self.add_hosts_to_iptables(new_hosts)
 
         if self.__pfctl and self.__pftable:
              debug("Trying to update PF table.")
@@ -541,6 +550,43 @@ allowed based on your %s file"""  % (self.__prefs.get("HOSTS_DENY"),
             os.chmod(filename, 0o644)
         except Exception as e:
             error(str(e))
+
+    def init_iptables(self):
+        debug("Initializing iptables")
+        try:
+            cmdline = """{ipset} create -quiet {setname} hash:ip""".format(
+                 ipset=self.__ipset, setname=self.__ipset_name)
+            debug("Creating IP set: [{}]".format(cmdline))
+            if os.system(cmdline) != 0:
+                debug("Error creating IP set, assuming it already exists")
+                return
+
+            # Adding ip set was successful, assuming that means the iptables
+            # rule isn't there yet
+            if self.__blockport:
+                cmdline = """{iptables} -I INPUT -p tcp --dport {port} -m set --match-set {setname} src -j {target}"""
+            else:
+                cmdline = """{iptables} -I INPUT -p tcp -m set --match-set {setname} src -j {target}"""
+            cmdline = cmdline.format(
+                port=self.__blockport, setname=self.__ipset_name, iptables=self.__iptables, target=self.__iptables_jump_target)
+            debug("Creating iptables rule for IP set: [{}]".format(cmdline))
+            os.system(cmdline)
+
+            # Fill IP set with currently blocked IP addresses
+            self.add_hosts_to_iptables(self.__denied_hosts)
+        except Exception as e:
+            print(e)
+            print("Unable to initialize iptables rule.")
+
+    def add_hosts_to_iptables(self, hosts):
+        try:
+            for host in hosts:
+                cmdline = """{ipset} -quiet add {setname} {host}""".format(setname=self.__ipset_name, ipset=self.__ipset, host=host)
+                info("Adding new IP address to set: %s", cmdline)
+                os.system(cmdline);
+        except Exception as e:
+            print(e)
+            print("Unable to add new blocked IP to firewall.")
 
     def get_regex(self, name, default):
         val = self.__prefs.get(name)

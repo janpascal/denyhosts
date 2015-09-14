@@ -34,6 +34,9 @@ class Prefs(dict):
                        'PLUGIN_DENY': None,
                        'PLUGIN_PURGE': None,
                        'IPTABLES': None,
+                       'IPTABLES_JUMP_TARGET': "DROP",
+                       'IPSET': "/sbin/ipset",
+                       'IPSET_NAME': "denyhosts",
                        'BLOCKPORT': None,
                        'PFCTL_PATH': None,
                        'PF_TABLE': None,
@@ -95,6 +98,7 @@ class Prefs(dict):
                          'HOSTS_DENY',
                          'DAEMON_LOG',
                          'IPTABLES',
+                         'IPSET',
                          'PFCTL_PATH',
                          'PF_TABLE_FILE')
 
